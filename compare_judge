@@ -1,0 +1,175 @@
+# -*- coding: utf-8 -*-
+import os
+import json
+import torch
+import re
+import dashscope
+from dashscope import Generation
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from peft import PeftModel
+from tqdm import tqdm
+
+# ===========================
+# 1. 配置区域
+# ===========================
+dashscope.api_key = os.getenv("DASHSCOPE_API_KEY") or "sk-7ba2fb93588a45a3b5b120658f45dc79"  
+
+BASE_MODEL_PATH = "./Qwen1.5-1.8B"  # 基座路径
+LORA_MODEL_PATH = "model_result/qwen_lora_sft"  # LoRA 路径
+TEST_DATA = "dataset/final_dataset.jsonl"  # 数据路径
+
+# 测试样本数
+TEST_COUNT = 3
+
+
+# ===========================
+# 2. 工具函数
+# ===========================
+def extract_json(text):
+    """从大模型输出中提取 JSON"""
+    try:
+        # 尝试找到第一个 { 和最后一个 }
+        match = re.search(r'\{.*\}', text.replace("\n", ""), re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+        return json.loads(text)
+    except:
+        return {"base_score": 0, "lora_score": 0, "reason": "打分解析失败"}
+
+
+def llm_compare_judge(question, truth, base_ans, lora_ans):
+    """让裁判对比两个回答并打分"""
+    prompt = f"""
+    你是一位法律专家。请根据【标准答案】，对比评价【回答A】(基座模型)和【回答B】(微调模型)。
+
+    【问题】：{question}
+    【标准答案】：{truth}
+
+    【回答A】：{base_ans}
+    【回答B】：{lora_ans}
+
+    请分别打分(0-10分)，并给出简短点评。
+    必须返回合法的 JSON 格式，格式如下：
+    {{
+        "base_score": <数字>,
+        "lora_score": <数字>,
+        "reason": "<50字以内的对比点评>"
+    }}
+    """
+    try:
+        resp = Generation.call(model="qwen-plus", prompt=prompt, result_format='message')
+        if resp.status_code == 200:
+            return extract_json(resp.output.choices[0].message.content)
+    except Exception as e:
+        print(f"Judge Error: {e}")
+    return {"base_score": 0, "lora_score": 0, "reason": "API 调用失败"}
+
+
+def generate(model, tokenizer, text):
+    """统一生成逻辑"""
+    messages = [{"role": "user", "content": text}]
+    input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer([input_text], return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=512,
+            do_sample=False
+        )
+    return tokenizer.decode(outputs[0][len(inputs.input_ids[0]):], skip_special_tokens=True).strip()
+
+
+# ===========================
+# 3. 主程序
+# ===========================
+def main():
+    # --- 准备数据 ---
+    questions = []
+    with open(TEST_DATA, "r", encoding="utf-8") as f:
+        for line in f:
+            questions.append(json.loads(line))
+    questions = questions[:TEST_COUNT]  # 只取前几条
+
+    # --- 阶段 1: 基座模型推理 ---
+    print(f">>> 1/3 正在加载基座模型 ({BASE_MODEL_PATH})...")
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL_PATH, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True
+    )
+
+    print(">>> 基座模型正在作答...")
+    base_answers = []
+    for q in tqdm(questions):
+        prompt = f"{q['instruction']}\n{q.get('input', '')}" if q.get('input') else q['instruction']
+        base_answers.append(generate(model, tokenizer, prompt))
+
+    # --- 阶段 2: LoRA 模型推理 ---
+    print(f"\n>>> 2/3 正在挂载 LoRA 权重 ({LORA_MODEL_PATH})...")
+    model = PeftModel.from_pretrained(model, LORA_MODEL_PATH)
+
+    print(">>> 微调模型正在作答...")
+    lora_answers = []
+    for q in tqdm(questions):
+        prompt = f"{q['instruction']}\n{q.get('input', '')}" if q.get('input') else q['instruction']
+        lora_answers.append(generate(model, tokenizer, prompt))
+
+    # --- 阶段 3: 裁判打分与展示 ---
+    print("\n>>> 3/3 正在请求大模型裁判打分并生成报告...\n")
+
+    total_base_score = 0
+    total_lora_score = 0
+
+    results = []
+
+    # 逐条打分
+    for i in range(len(questions)):
+        res = llm_compare_judge(
+            questions[i]["instruction"],
+            questions[i]["output"],
+            base_answers[i],
+            lora_answers[i]
+        )
+        results.append(res)
+        total_base_score += res["base_score"]
+        total_lora_score += res["lora_score"]
+
+    # ===========================
+    # 最终报告输出
+    # ===========================
+    print("█" * 60)
+    print("               微调效果评估报告               ")
+    print("█" * 60 + "\n")
+
+    # 1. 总体平均分
+    avg_base = total_base_score / TEST_COUNT
+    avg_lora = total_lora_score / TEST_COUNT
+
+    print(f"📊 【总体评分】 (共 {TEST_COUNT} 个测试案例)")
+    print(f"----------------------------------------")
+    print(f"🔴 基座模型 (Base):  {avg_base:.1f} / 10.0")
+    print(f"🟢 微调模型 (LoRA):  {avg_lora:.1f} / 10.0")
+    print(f"📈 提升幅度:        +{avg_lora - avg_base:.1f} 分")
+    print(f"----------------------------------------\n")
+
+    # 2. 具体案例展示
+    print(f"📝 【具体案例详情】")
+    for i in range(TEST_COUNT):
+        q = questions[i]
+        r = results[i]
+
+        print(f"案例 #{i + 1}")
+        print(f"问：{q['instruction']}")
+        print("-" * 50)
+        print(f"🔴 基座回答 ({r['base_score']}分):")
+        print(f"{base_answers[i][:100]}..." if len(base_answers[i]) > 100 else base_answers[i])  # 只显示前100字避免刷屏
+        print("-" * 50)
+        print(f"🟢 微调回答 ({r['lora_score']}分):")
+        print(f"{lora_answers[i][:100]}..." if len(lora_answers[i]) > 100 else lora_answers[i])
+        print("-" * 50)
+        print(f"💡 专家点评: {r['reason']}")
+        print("=" * 60 + "\n")
+
+
+if __name__ == "__main__":
+    main()
