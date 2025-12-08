@@ -1,9 +1,4 @@
 环境配置：
-
-pip install transformers==4.38.1
-
-pip install peft
-
 pip install datasets
 
 pip install accelerate
@@ -18,7 +13,9 @@ pip install sentence_transformers
 
 pip install dashscope
 
-如果transformers和peft出现兼容性问题，就：pip install -U "transformers>=4.40.0" "peft>=0.10.0" "bitsandbytes>=0.43.0" accelerate
+pip install -U "transformers>=4.40.0" "peft>=0.10.0" "bitsandbytes>=0.43.0" accelerate
+
+pip install gradio 
 
 # 每部分功能 #
 
@@ -38,4 +35,8 @@ text2vec-large-chinese文件: 用于语义去重的模型，请从huggingface上
  
 Qwen1.5-1.8B文本：用于训练的原版小模型，请从huggingface上拉下来  https://huggingface.co/Qwen/Qwen1.5-1.8B
 
-train_lora_sft.py：用于进行QLora指令微调的训练代码，训练参数可调（目前只设置了很小的训练量）
+train_lora_sft.py：用于进行QLora指令微调的训练代码
+
+## 交互： ##
+
+gradio_chat.py : 基于gradio的交互

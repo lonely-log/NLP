@@ -15,11 +15,11 @@ from tqdm import tqdm
 dashscope.api_key = os.getenv("DASHSCOPE_API_KEY") or "sk-7ba2fb93588a45a3b5b120658f45dc79"  
 
 BASE_MODEL_PATH = "./Qwen1.5-1.8B"  # 基座路径
-LORA_MODEL_PATH = "model_result/qwen_lora_sft"  # LoRA 路径
+LORA_MODEL_PATH = "model_result/qwen_lora_sft_3h/checkpoint-8000"  # LoRA 路径
 TEST_DATA = "dataset/final_dataset.jsonl"  # 数据路径
 
 # 测试样本数
-TEST_COUNT = 3
+TEST_COUNT = 10
 
 
 # ===========================
